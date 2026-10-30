@@ -1,6 +1,8 @@
-import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { FormEvent, useLayoutEffect, useRef, useState } from "react"
 import gsap from "gsap"
 import { ScrollTrigger } from "gsap/ScrollTrigger"
+import Lenis from "lenis"
+import { HeroSkyCanvas, type SkyAnimationState } from "./HeroSkyCanvas"
 
 gsap.registerPlugin(ScrollTrigger)
 
@@ -281,6 +283,8 @@ const Icon = ({
 function App() {
   const root = useRef<HTMLDivElement>(null)
   const pausedRef = useRef(false)
+  const lenisRef = useRef<Lenis | null>(null)
+  const skyStateRef = useRef<SkyAnimationState>({ progress: 0, paused: false })
   const [origin, setOrigin] = useState<PackageKey>("uk")
   const [filter, setFilter] = useState("All")
   const [saved, setSaved] = useState<string[]>([])
@@ -292,9 +296,7 @@ function App() {
   const [submitted, setSubmitted] = useState(false)
   const [formError, setFormError] = useState("")
   const [paused, setPaused] = useState(false)
-  const [fullMotion, setFullMotion] = useState(
-    () => !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  )
+  const [fullMotion, setFullMotion] = useState(true)
   const packageData = packages[origin]
   const visibleDestinations =
     filter === "All"
@@ -336,16 +338,49 @@ function App() {
         { y: 0, autoAlpha: 1, stagger: 0.1, duration: 0.7 },
         0.75,
       )
-      .fromTo(
-        ".search-control",
-        { y: 18, autoAlpha: 0 },
-        { y: 0, autoAlpha: 1, stagger: 0.08, duration: 0.55 },
-        1,
-      )
+  }
+
+  const scrollToTarget = (target: string | number) => {
+    if (lenisRef.current) {
+      lenisRef.current.scrollTo(target, {
+        duration: 1.4,
+        easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
+      })
+    } else if (typeof target === "string") {
+      document.querySelector(target)?.scrollIntoView({ behavior: "smooth" })
+    } else {
+      window.scrollTo({ top: target, behavior: "smooth" })
+    }
   }
 
   useLayoutEffect(() => {
     if (!root.current) return
+
+    const lenis = new Lenis({
+      autoRaf: false,
+      lerp: 0.075,
+      orientation: "vertical",
+      gestureOrientation: "vertical",
+      smoothWheel: true,
+      wheelMultiplier: 1.0,
+      touchMultiplier: 1.5,
+      syncTouch: true,
+      syncTouchLerp: 0.075,
+    })
+    lenisRef.current = lenis
+    lenis.on("scroll", ScrollTrigger.update)
+
+    const lenisTicker = (time: number) => {
+      lenis.raf(time * 1000)
+    }
+    gsap.ticker.add(lenisTicker)
+    gsap.ticker.lagSmoothing(0)
+
+    const onScrollTriggerRefresh = () => {
+      lenis.resize()
+    }
+    ScrollTrigger.addEventListener("refresh", onScrollTriggerRefresh)
+
     let ctx: gsap.Context | undefined
     try {
       ctx = gsap.context(() => {
@@ -357,35 +392,385 @@ function App() {
           return
         }
         playIntro()
-        gsap.utils.toArray<HTMLElement>(".reveal").forEach((element) => {
-          gsap.fromTo(element, { y: 44, autoAlpha: 0 }, {
-            y: 0,
-            autoAlpha: 1,
-            duration: 0.85,
-            ease: "power3.out",
-            scrollTrigger: { trigger: element, start: "top 86%", once: true },
+        skyStateRef.current.progress = 0
+
+        let wasFlying = false
+        let lastFlight = -1
+        let portalMetrics: {
+          originX: number
+          originY: number
+          deltaX: number
+          deltaY: number
+        } | null = null
+
+        const contentEl = root.current?.querySelector<HTMLElement>(".hero-content")
+        const oEl = root.current?.querySelector<HTMLElement>(".hero-portal-o")
+        const headerEl = root.current?.querySelector<HTMLElement>(".site-header")
+        const shadeEl = root.current?.querySelector<HTMLElement>(".hero-shade")
+        const secondSectionEl = root.current?.querySelector<HTMLElement>(
+          ".hero-second-section",
+        )
+        const supportEls = root.current?.querySelectorAll<HTMLElement>(
+          ".hero-kicker, .hero-bottom, .replay, .hero-second-line",
+        )
+
+        const measurePortalO = () => {
+          if (!contentEl || !oEl) return
+          gsap.set(contentEl, { x: 0, y: 0, scale: 1, rotation: 0 })
+          const contentRect = contentEl.getBoundingClientRect()
+          const oRect = oEl.getBoundingClientRect()
+          // Optical center of the inner oval counter (hole) of lowercase 'o'
+          const oCenterX = oRect.left + oRect.width * 0.5
+          const oCenterY = oRect.top + oRect.height * 0.53
+          const originX = oCenterX - contentRect.left
+          const originY = oCenterY - contentRect.top
+          // Align the 'o' portal directly with Sigiriya Rock's summit (49.5% X, 43.5% Y)
+          const targetX = window.innerWidth * 0.495
+          const targetY = window.innerHeight * 0.435
+          portalMetrics = {
+            originX,
+            originY,
+            deltaX: targetX - oCenterX,
+            deltaY: targetY - oCenterY,
+          }
+          gsap.set(contentEl, {
+            transformOrigin: `${originX}px ${originY}px`,
           })
+        }
+
+        skyStateRef.current.onFlightTick = (flightProgress: number) => {
+          if (!contentEl) return
+          if (Math.abs(flightProgress - lastFlight) < 0.0002 && flightProgress > 0.0005) {
+            return
+          }
+          lastFlight = flightProgress
+
+          if (flightProgress <= 0.0005) {
+            if (wasFlying) {
+              wasFlying = false
+              gsap.set(contentEl, {
+                x: 0,
+                y: 0,
+                scale: 1,
+                rotation: 0,
+                autoAlpha: 1,
+              })
+              if (headerEl) gsap.set(headerEl, { autoAlpha: 1 })
+              if (supportEls?.length) gsap.set(supportEls, { autoAlpha: 1 })
+              if (shadeEl) gsap.set(shadeEl, { autoAlpha: 1 })
+              if (secondSectionEl) {
+                gsap.set(secondSectionEl, {
+                  autoAlpha: 0,
+                  y: 44,
+                  pointerEvents: "none",
+                })
+              }
+            }
+            return
+          }
+
+          if (!wasFlying || !portalMetrics) {
+            measurePortalO()
+            wasFlying = true
+          }
+          if (!portalMetrics) return
+
+          // Portal fly-through completes across the first 45% of the drone flight
+          const portalT = Math.min(1, flightProgress / 0.45)
+          const alignRaw = Math.min(1, portalT / 0.32)
+          const alignEase = alignRaw * alignRaw * (3 - 2 * alignRaw)
+
+          // Exponential zoom through the inner counter of the letter "o"
+          const scale = 1 + Math.pow(portalT, 2.35) * 115
+          const bankDeg = Math.sin(portalT * Math.PI) * -4.2
+
+          const supportAlpha = Math.max(0, 1 - flightProgress / 0.14)
+          const initialShadeAlpha = Math.max(0, 1 - flightProgress / 0.32)
+          const contentAlpha =
+            portalT < 0.54 ? 1 : Math.max(0, 1 - (portalT - 0.54) / 0.42)
+
+          // After passing through the letter "o" into the Ella image, reveal the second section on the hero area
+          const secondRaw = Math.max(
+            0,
+            Math.min(1, (flightProgress - 0.48) / 0.30),
+          )
+          const secondEase = secondRaw * secondRaw * (3 - 2 * secondRaw)
+          const headerAlpha = Math.max(supportAlpha, secondEase)
+          const shadeAlpha = Math.max(initialShadeAlpha, secondEase * 0.92)
+
+          gsap.set(contentEl, {
+            x: portalMetrics.deltaX * alignEase,
+            y: portalMetrics.deltaY * alignEase,
+            scale,
+            rotation: bankDeg,
+            autoAlpha: contentAlpha,
+          })
+          if (headerEl) gsap.set(headerEl, { autoAlpha: headerAlpha })
+          if (supportEls?.length) gsap.set(supportEls, { autoAlpha: supportAlpha })
+          if (shadeEl) gsap.set(shadeEl, { autoAlpha: shadeAlpha })
+          if (secondSectionEl) {
+            gsap.set(secondSectionEl, {
+              autoAlpha: secondEase,
+              y: (1 - secondEase) * 44,
+              pointerEvents: secondEase > 0.15 ? "auto" : "none",
+            })
+          }
+        }
+
+        gsap.set(".hero-second-section", {
+          autoAlpha: 0,
+          y: 44,
+          pointerEvents: "none",
         })
+
+        gsap.fromTo(
+          ".hero-angle-track",
+          { xPercent: 0 },
+          {
+            xPercent: -50,
+            duration: 14,
+            ease: "none",
+            repeat: -1,
+          },
+        )
+
+        ScrollTrigger.create({
+          trigger: ".hero",
+          start: "top top",
+          end: "+=4400",
+          pin: true,
+          pinSpacing: true,
+          onRefresh: () => {
+            portalMetrics = null
+            if (wasFlying) {
+              measurePortalO()
+            }
+          },
+          onUpdate: (self) => {
+            skyStateRef.current.progress = Math.max(0, Math.min(1, self.progress))
+          },
+          onLeave: () => {
+            skyStateRef.current.progress = 1
+          },
+          onLeaveBack: () => {
+            skyStateRef.current.progress = 0
+          },
+        })
+        // 1. Editorial section headings & general reveal blocks
+        gsap.utils
+          .toArray<HTMLElement>(".reveal:not(.essentials-grid details)")
+          .forEach((element) => {
+            gsap.fromTo(
+              element,
+              { y: 44, autoAlpha: 0 },
+              {
+                y: 0,
+                autoAlpha: 1,
+                duration: 0.9,
+                ease: "power3.out",
+                scrollTrigger: {
+                  trigger: element,
+                  start: "top 86%",
+                  toggleActions: "play none none reverse",
+                },
+              },
+            )
+          })
+
+        // 2. Parallax media across sections (locked 1:1 to Lenis inertia)
         gsap.utils
           .toArray<HTMLElement>("[data-parallax]")
           .forEach((element) => {
-            gsap.fromTo(element, { yPercent: -4 }, {
-              yPercent: 4,
-              ease: "none",
-              scrollTrigger: {
-                trigger: element.parentElement,
-                start: "top bottom",
-                end: "bottom top",
-                scrub: 0.8,
+            gsap.fromTo(
+              element,
+              { yPercent: -6, scale: 1.05 },
+              {
+                yPercent: 6,
+                scale: 1,
+                ease: "none",
+                scrollTrigger: {
+                  trigger: element.parentElement,
+                  start: "top bottom",
+                  end: "bottom top",
+                  scrub: true,
+                },
               },
-            })
+            )
           })
-        gsap.fromTo(".closing-inner", { scale: 0.94, autoAlpha: 0 }, {
-          scale: 1,
-          autoAlpha: 1,
-          duration: 1,
-          scrollTrigger: { trigger: ".closing", start: "top 75%", once: true },
-        })
+
+        // 3. Journeys section: 3-column detail panels & included/excluded checklists
+        gsap.fromTo(
+          ".details-grid .detail-panel",
+          { y: 52, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.14,
+            duration: 0.85,
+            ease: "power3.out",
+            scrollTrigger: {
+              trigger: ".details-grid",
+              start: "top 82%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        gsap.fromTo(
+          ".included > div:not(:first-child) p",
+          { x: 24, autoAlpha: 0 },
+          {
+            x: 0,
+            autoAlpha: 1,
+            stagger: 0.06,
+            duration: 0.65,
+            ease: "power2.out",
+            scrollTrigger: {
+              trigger: ".included",
+              start: "top 80%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        // 4. Places section: filter buttons stagger
+        gsap.fromTo(
+          ".filters button",
+          { y: 18, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.06,
+            duration: 0.55,
+            ease: "power2.out",
+            scrollTrigger: {
+              trigger: ".filters",
+              start: "top 88%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        // 5. Care section: GPU-composited image expansion & 4 care pillars stagger
+        gsap.fromTo(
+          ".care-image",
+          { scale: 0.95 },
+          {
+            scale: 1,
+            ease: "none",
+            scrollTrigger: {
+              trigger: ".care-image",
+              start: "top 85%",
+              end: "top 25%",
+              scrub: true,
+            },
+          },
+        )
+
+        gsap.fromTo(
+          ".care-list > div",
+          { y: 42, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.12,
+            duration: 0.8,
+            ease: "power3.out",
+            scrollTrigger: {
+              trigger: ".care-list",
+              start: "top 82%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        // 6. Comparison table: row-by-row cascade
+        gsap.fromTo(
+          ".comparison-head, .comparison-row",
+          { y: 26, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.09,
+            duration: 0.7,
+            ease: "power3.out",
+            scrollTrigger: {
+              trigger: ".comparison-table",
+              start: "top 82%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        // 7. Travel essentials: staggered two-column accordion cards
+        gsap.fromTo(
+          ".essentials-grid details",
+          { y: 34, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.08,
+            duration: 0.75,
+            ease: "power3.out",
+            scrollTrigger: {
+              trigger: ".essentials-grid",
+              start: "top 84%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        // 8. Closing section: scrubbed background zoom & staggered callout
+        gsap.fromTo(
+          ".closing > img",
+          { scale: 1.14, yPercent: -5 },
+          {
+            scale: 1,
+            yPercent: 5,
+            ease: "none",
+            scrollTrigger: {
+              trigger: ".closing",
+              start: "top bottom",
+              end: "bottom top",
+              scrub: 0.8,
+            },
+          },
+        )
+
+        gsap.fromTo(
+          ".closing-inner > *",
+          { y: 36, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.12,
+            duration: 0.9,
+            ease: "power3.out",
+            scrollTrigger: {
+              trigger: ".closing",
+              start: "top 75%",
+              toggleActions: "play none none reverse",
+            },
+          },
+        )
+
+        // 9. Footer entrance
+        gsap.fromTo(
+          "footer .footer-top > *, footer .footer-bottom",
+          { y: 26, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            stagger: 0.1,
+            duration: 0.75,
+            ease: "power2.out",
+            scrollTrigger: {
+              trigger: "footer",
+              start: "top 88%",
+              toggleActions: "play none none none",
+            },
+          },
+        )
       }, root)
       const refresh = () => ScrollTrigger.refresh()
       window.addEventListener("load", refresh)
@@ -406,6 +791,10 @@ function App() {
         window.removeEventListener("load", refresh)
         window.removeEventListener("pageshow", onPageShow)
         document.removeEventListener("visibilitychange", onVisibility)
+        ScrollTrigger.removeEventListener("refresh", onScrollTriggerRefresh)
+        gsap.ticker.remove(lenisTicker)
+        lenis.destroy()
+        lenisRef.current = null
         ctx?.revert()
       }
     } catch (error) {
@@ -417,25 +806,144 @@ function App() {
   useLayoutEffect(() => {
     if (!fullMotion || !root.current) return
     const ctx = gsap.context(() => {
-      gsap.fromTo(".dynamic-card", { y: 28, autoAlpha: 0 }, {
-        y: 0,
-        autoAlpha: 1,
-        stagger: 0.09,
-        duration: 0.55,
-        ease: "power2.out",
-        clearProps: "transform",
-      })
+      // Featured package card & copy stagger on scroll / package switch
+      gsap.fromTo(
+        ".featured-package",
+        { y: 40, autoAlpha: 0 },
+        {
+          y: 0,
+          autoAlpha: 1,
+          duration: 0.85,
+          ease: "power3.out",
+          scrollTrigger: {
+            trigger: ".featured-package",
+            start: "top 84%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
+      gsap.fromTo(
+        ".package-copy > *",
+        { y: 24, autoAlpha: 0 },
+        {
+          y: 0,
+          autoAlpha: 1,
+          stagger: 0.07,
+          duration: 0.65,
+          ease: "power2.out",
+          scrollTrigger: {
+            trigger: ".featured-package",
+            start: "top 80%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
+      // Day-by-day itinerary list items stagger on scroll / package switch
+      gsap.fromTo(
+        ".itinerary-day",
+        { y: 30, autoAlpha: 0 },
+        {
+          y: 0,
+          autoAlpha: 1,
+          stagger: 0.08,
+          duration: 0.65,
+          ease: "power2.out",
+          clearProps: "transform",
+          scrollTrigger: {
+            trigger: ".itinerary-list",
+            start: "top 84%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
+      // Route section numbered stops, island silhouette, SVG route line draw & markers
+      gsap.fromTo(
+        ".route-copy ol li",
+        { x: -22, autoAlpha: 0 },
+        {
+          x: 0,
+          autoAlpha: 1,
+          stagger: 0.08,
+          duration: 0.6,
+          ease: "power2.out",
+          scrollTrigger: {
+            trigger: ".route-section",
+            start: "top 78%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
+      gsap.fromTo(
+        ".map-wrap .island",
+        { scale: 0.92, autoAlpha: 0, transformOrigin: "center" },
+        {
+          scale: 1,
+          autoAlpha: 1,
+          duration: 0.9,
+          ease: "power3.out",
+          scrollTrigger: {
+            trigger: ".map-wrap",
+            start: "top 82%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
       gsap.fromTo(
         ".route-line",
         { strokeDasharray: 1000, strokeDashoffset: 1000 },
-        { strokeDashoffset: 0, duration: 1.4, ease: "power2.inOut" },
+        {
+          strokeDashoffset: 0,
+          duration: 1.6,
+          ease: "power2.inOut",
+          scrollTrigger: {
+            trigger: ".map-wrap",
+            start: "top 78%",
+            toggleActions: "play none none reverse",
+          },
+        },
       )
-      gsap.fromTo(".route-marker", { scale: 0, transformOrigin: "center" }, {
-        scale: 1,
-        stagger: 0.12,
-        duration: 0.4,
-        ease: "back.out(1.7)",
-      })
+
+      gsap.fromTo(
+        ".route-marker",
+        { scale: 0, transformOrigin: "center" },
+        {
+          scale: 1,
+          stagger: 0.14,
+          duration: 0.45,
+          ease: "back.out(1.8)",
+          scrollTrigger: {
+            trigger: ".map-wrap",
+            start: "top 76%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
+      // Destination grid cards stagger on scroll / category filter change
+      gsap.fromTo(
+        ".destination-card",
+        { y: 46, scale: 0.97, autoAlpha: 0 },
+        {
+          y: 0,
+          scale: 1,
+          autoAlpha: 1,
+          stagger: 0.09,
+          duration: 0.7,
+          ease: "power3.out",
+          clearProps: "transform",
+          scrollTrigger: {
+            trigger: ".destination-grid",
+            start: "top 85%",
+            toggleActions: "play none none reverse",
+          },
+        },
+      )
+
       window.setTimeout(() => ScrollTrigger.refresh(), 100)
     }, root)
     return () => ctx.revert()
@@ -466,10 +974,13 @@ function App() {
     const next = !paused
     setPaused(next)
     pausedRef.current = next
+    skyStateRef.current.paused = next
     if (next) {
+      lenisRef.current?.stop()
       gsap.globalTimeline.pause()
       ScrollTrigger.getAll().forEach((trigger) => trigger.disable(false))
     } else {
+      lenisRef.current?.start()
       gsap.globalTimeline.resume()
       ScrollTrigger.getAll().forEach((trigger) => trigger.enable())
       ScrollTrigger.refresh()
@@ -520,88 +1031,105 @@ function App() {
       ref={root}
       className={`site ${fullMotion ? "motion-on" : "motion-off"}`}
     >
-      <header className="site-header">
-        <a
-          className="brand nav-animate"
-          href="#top"
-          aria-label="Ceylon Trails home"
-        >
-          <span className="brand-mark">CT</span>
-          <span>
-            <strong>Ceylon Trails</strong>
-            <small>Journeys across Sri Lanka</small>
-          </span>
-        </a>
-        <button
-          className="icon-button menu-button nav-animate"
-          onClick={() => setMobileNav(!mobileNav)}
-          aria-label="Open navigation"
-        >
-          <Icon name="menu" />
-        </button>
-        <nav
-          className={mobileNav ? "nav-open" : ""}
-          aria-label="Main navigation"
-        >
-          <a
-            className="nav-animate"
-            href="#journeys"
-            onClick={() => setMobileNav(false)}
-          >
-            Journeys
-          </a>
-          <a
-            className="nav-animate"
-            href="#places"
-            onClick={() => setMobileNav(false)}
-          >
-            Places
-          </a>
-          <a
-            className="nav-animate"
-            href="#essentials"
-            onClick={() => setMobileNav(false)}
-          >
-            Travel notes
-          </a>
-        </nav>
-        <div className="header-actions">
-          <label className="origin-select nav-animate">
-            Travelling from
-            <select
-              value={origin}
-              onChange={(event) => setOrigin(event.target.value as PackageKey)}
-            >
-              <option value="uk">United Kingdom</option>
-              <option value="india">India</option>
-            </select>
-          </label>
-          <button
-            className="saved-button nav-animate"
-            onClick={() => document.querySelector("#places")?.scrollIntoView()}
-          >
-            <Icon name="heart" /> Saved <span>{saved.length}</span>
-          </button>
-          <button
-            className="button button-dark nav-animate"
-            onClick={() => {
-              setEnquiryOpen(true)
-              setStep(1)
-              setSubmitted(false)
-            }}
-          >
-            Plan my trip
-          </button>
-        </div>
-      </header>
-
       <main id="top">
         <section className="hero">
+          <header className="site-header">
+            <a
+              className="brand nav-animate"
+              href="#top"
+              onClick={(e) => {
+                e.preventDefault()
+                scrollToTarget(0)
+              }}
+              aria-label="Ceylon Trails home"
+            >
+              <span className="brand-mark">CT</span>
+              <span>
+                <strong>Ceylon Trails</strong>
+                <small>Journeys across Sri Lanka</small>
+              </span>
+            </a>
+            <button
+              className="icon-button menu-button nav-animate"
+              onClick={() => setMobileNav(!mobileNav)}
+              aria-label="Open navigation"
+            >
+              <Icon name="menu" />
+            </button>
+            <nav
+              className={mobileNav ? "nav-open" : ""}
+              aria-label="Main navigation"
+            >
+              <a
+                className="nav-animate"
+                href="#journeys"
+                onClick={(e) => {
+                  e.preventDefault()
+                  setMobileNav(false)
+                  scrollToTarget("#journeys")
+                }}
+              >
+                Journeys
+              </a>
+              <a
+                className="nav-animate"
+                href="#places"
+                onClick={(e) => {
+                  e.preventDefault()
+                  setMobileNav(false)
+                  scrollToTarget("#places")
+                }}
+              >
+                Places
+              </a>
+              <a
+                className="nav-animate"
+                href="#essentials"
+                onClick={(e) => {
+                  e.preventDefault()
+                  setMobileNav(false)
+                  scrollToTarget("#essentials")
+                }}
+              >
+                Travel notes
+              </a>
+            </nav>
+            <div className="header-actions">
+              <label className="origin-select nav-animate">
+                Travelling from
+                <select
+                  value={origin}
+                  onChange={(event) => setOrigin(event.target.value as PackageKey)}
+                >
+                  <option value="uk">United Kingdom</option>
+                  <option value="india">India</option>
+                </select>
+              </label>
+              <button
+                className="saved-button nav-animate"
+                onClick={() => scrollToTarget("#places")}
+              >
+                <Icon name="heart" /> Saved <span>{saved.length}</span>
+              </button>
+              <button
+                className="button button-dark nav-animate"
+                onClick={() => {
+                  setEnquiryOpen(true)
+                  setStep(1)
+                  setSubmitted(false)
+                }}
+              >
+                Plan my trip
+              </button>
+            </div>
+          </header>
+
           <div className="hero-media intro-animate">
             <img
               src="/images/sigiriya.webp"
               alt="Sigiriya rock fortress rising above Sri Lanka's forest"
             />
+            <HeroSkyCanvas stateRef={skyStateRef} />
           </div>
           <div className="hero-shade" />
           <div className="hero-content">
@@ -609,10 +1137,12 @@ function App() {
               Private journeys · Sri Lanka
             </p>
             <h1 aria-label="Go slowly. See deeply.">
-              <span>
-                <span className="hero-word intro-animate">Go slowly.</span>
+              <span className="hero-first-line">
+                <span className="hero-word intro-animate">
+                  G<span className="hero-portal-o">o</span> slowly.
+                </span>
               </span>
-              <span>
+              <span className="hero-second-line">
                 <span className="hero-word intro-animate">
                   <em>See deeply.</em>
                 </span>
@@ -626,79 +1156,156 @@ function App() {
               <a
                 className="button button-lime hero-support intro-animate"
                 href="#journeys"
+                onClick={(e) => {
+                  e.preventDefault()
+                  scrollToTarget("#journeys")
+                }}
               >
                 Explore the journeys <Icon name="arrow" />
               </a>
             </div>
           </div>
+
+          <div className="hero-second-section">
+            <div className="intro-section section-shell hero-intro-overlay">
+              <p className="vertical-note">18 years of local knowledge</p>
+              <div className="section-heading">
+                <p className="eyebrow">An island worth lingering over</p>
+                <h2>
+                  Sri Lanka, <em>at your pace.</em>
+                </h2>
+              </div>
+              <div className="intro-grid">
+                <p className="lead">
+                  A small island can hold an astonishing number of worlds. We
+                  connect them with good guides, considered stays and room to
+                  change course.
+                </p>
+                <p>
+                  These are illustrative arrangements, shaped as a starting
+                  point—not a rigid group tour. Tell us how you like to travel
+                  and we’ll refine the rhythm around you.
+                </p>
+              </div>
+            </div>
+
+            <div className="hero-angle-strap-wrap" aria-label="Travel accolades and certifications">
+              <div className="hero-angle-strap">
+                <div className="hero-angle-track">
+                  {[0, 1].map((copyIndex) => (
+                    <div
+                      className="hero-angle-group"
+                      key={copyIndex}
+                      aria-hidden={copyIndex === 1}
+                    >
+                      <div className="strap-badge">
+                        <span className="strap-badge-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <circle cx="7.5" cy="13.5" r="3.5" />
+                            <circle cx="16.5" cy="13.5" r="3.5" />
+                            <circle cx="7.5" cy="13.5" r="1.2" fill="currentColor" />
+                            <circle cx="16.5" cy="13.5" r="1.2" fill="currentColor" />
+                            <path d="M12 17l-1.8-2.2h3.6L12 17z" fill="currentColor" />
+                            <path d="M4 10c2.2-2.4 5-3.5 8-3.5s5.8 1.1 8 3.5" />
+                          </svg>
+                        </span>
+                        <span className="strap-badge-text">
+                          <strong>Tripadvisor</strong>
+                          <small>Travellers’ Choice · 5.0 ★</small>
+                        </span>
+                      </div>
+
+                      <span className="strap-Dot" aria-hidden="true">✦</span>
+
+                      <div className="strap-badge">
+                        <span className="strap-badge-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <path d="M12 2l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 15.5l-5.2 2.8 1-5.9-4.3-4.2 5.9-.8L12 2z" />
+                          </svg>
+                        </span>
+                        <span className="strap-badge-text">
+                          <strong>Condé Nast Traveler</strong>
+                          <small>Gold List Specialist</small>
+                        </span>
+                      </div>
+
+                      <span className="strap-Dot" aria-hidden="true">✦</span>
+
+                      <div className="strap-badge">
+                        <span className="strap-badge-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                            <path d="M9 12l2 2 4-4" />
+                          </svg>
+                        </span>
+                        <span className="strap-badge-text">
+                          <strong>ABTA &amp; ATOL Protected</strong>
+                          <small>100% Financial Security</small>
+                        </span>
+                      </div>
+
+                      <span className="strap-Dot" aria-hidden="true">✦</span>
+
+                      <div className="strap-badge">
+                        <span className="strap-badge-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <circle cx="12" cy="12" r="9" />
+                            <polygon points="14.8,9.2 13,13 9.2,14.8 11,11" fill="currentColor" />
+                          </svg>
+                        </span>
+                        <span className="strap-badge-text">
+                          <strong>Lonely Planet</strong>
+                          <small>Best in Travel · Sri Lanka</small>
+                        </span>
+                      </div>
+
+                      <span className="strap-Dot" aria-hidden="true">✦</span>
+
+                      <div className="strap-badge">
+                        <span className="strap-badge-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+                            <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+                            <path d="M4 22h16" />
+                            <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
+                            <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
+                            <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
+                          </svg>
+                        </span>
+                        <span className="strap-badge-text">
+                          <strong>Travel + Leisure</strong>
+                          <small>World’s Best Awards</small>
+                        </span>
+                      </div>
+
+                      <span className="strap-Dot" aria-hidden="true">✦</span>
+
+                      <div className="strap-badge">
+                        <span className="strap-badge-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <path d="M12 3l2.3 4.7 5.2.7-3.8 3.7.9 5.2L12 14.8l-4.6 2.5.9-5.2-3.8-3.7 5.2-.7L12 3z" />
+                          </svg>
+                        </span>
+                        <span className="strap-badge-text">
+                          <strong>Trustpilot</strong>
+                          <small>4.9 / 5 · Bespoke Private Tours</small>
+                        </span>
+                      </div>
+
+                      <span className="strap-Dot" aria-hidden="true">✦</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
           <button
             className="replay hero-support intro-animate"
             onClick={playIntro}
           >
             <Icon name="play" /> Replay intro
           </button>
-        </section>
-
-        <section className="search-wrap" aria-label="Trip search">
-          <div className="search-bar">
-            <label className="search-control intro-animate">
-              <span>Travelling from</span>
-              <select
-                value={origin}
-                onChange={(event) =>
-                  setOrigin(event.target.value as PackageKey)
-                }
-              >
-                <option value="uk">United Kingdom</option>
-                <option value="india">India</option>
-              </select>
-            </label>
-            <label className="search-control intro-animate">
-              <span>Arriving</span>
-              <input type="date" min={new Date().toISOString().split("T")[0]} />
-            </label>
-            <label className="search-control intro-animate">
-              <span>Travellers</span>
-              <select defaultValue="2">
-                <option>1 traveller</option>
-                <option value="2">2 travellers</option>
-                <option>3 travellers</option>
-                <option>4+ travellers</option>
-              </select>
-            </label>
-            <button
-              className="button button-dark search-control intro-animate"
-              onClick={() =>
-                document
-                  .querySelector("#journeys")
-                  ?.scrollIntoView({ behavior: "smooth" })
-              }
-            >
-              Find my journey <Icon name="arrow" />
-            </button>
-          </div>
-        </section>
-
-        <section className="intro-section section-shell">
-          <p className="vertical-note">18 years of local knowledge</p>
-          <div className="section-heading reveal">
-            <p className="eyebrow">An island worth lingering over</p>
-            <h2>
-              Sri Lanka, <em>at your pace.</em>
-            </h2>
-          </div>
-          <div className="intro-grid reveal">
-            <p className="lead">
-              A small island can hold an astonishing number of worlds. We
-              connect them with good guides, considered stays and room to change
-              course.
-            </p>
-            <p>
-              These are illustrative arrangements, shaped as a starting
-              point—not a rigid group tour. Tell us how you like to travel and
-              we’ll refine the rhythm around you.
-            </p>
-          </div>
         </section>
 
         <section id="journeys" className="journey-section">
@@ -1215,6 +1822,7 @@ function App() {
                 setFullMotion(true)
                 setPaused(false)
                 pausedRef.current = false
+                skyStateRef.current.paused = false
                 gsap.globalTimeline.resume()
               }}
             >

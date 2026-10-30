@@ -1,0 +1,8 @@
+{
+  "name": "Ceylon Trails",
+  "description": "Private, thoughtful journeys across Sri Lanka connecting ancient cities, tea-covered highlands, and the Indian Ocean coast.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
